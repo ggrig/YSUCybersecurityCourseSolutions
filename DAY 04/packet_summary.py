@@ -20,13 +20,18 @@ import os
 from collections import Counter, defaultdict
 from datetime import datetime
 
-from scapy.all import rdpcap, DNS, DNSQR, DNSRR, IP, IPv6, TCP, UDP
+from scapy.all import rdpcap, DNS, IP, IPv6, TCP, UDP
+
+# ------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------
 
 def ts_iso(ts_float: float) -> str:
+    """Convert a timestamp float to an ISO 8601 UTC string."""
     return datetime.utcfromtimestamp(ts_float).isoformat() + "Z"
 
 def l3_addrs(pkt):
-    """Return (src, dst, ip_version, l3_len)"""
+    """Extract L3 (IP/IPv6) addresses and packet length."""
     if IP in pkt:
         return pkt[IP].src, pkt[IP].dst, 4, int(pkt[IP].len) if hasattr(pkt[IP], "len") else len(pkt)
     if IPv6 in pkt:
@@ -34,10 +39,10 @@ def l3_addrs(pkt):
     return None, None, None, len(pkt)
 
 def l4_info(pkt):
-    """Return (proto, sport, dport, tcp_flags_str)"""
+    """Extract L4 protocol details: protocol, ports, TCP flags."""
     if TCP in pkt:
         flags = pkt[TCP].flags
-        # Produce human-friendly flags like "S", "SA", "FA", etc.
+        # Generate human-readable flag string (e.g., 'S', 'SA', 'FA')
         order = [("F", 0x01), ("S", 0x02), ("R", 0x04), ("P", 0x08),
                  ("A", 0x10), ("U", 0x20), ("E", 0x40), ("C", 0x80)]
         flag_str = "".join(ch for ch, bit in order if flags & bit)
@@ -47,7 +52,10 @@ def l4_info(pkt):
     return None, None, None, ""
 
 def undirected_flow_key(proto, src, sport, dst, dport):
-    """Direction-agnostic flow key: (proto, sorted(((ip,port),(ip,port))))"""
+    """
+    Create a direction-agnostic flow key (so A→B and B→A are the same).
+    Returns a tuple: (proto, ((ip,port),(ip,port))) sorted.
+    """
     a = (src, sport)
     b = (dst, dport)
     if a <= b:
@@ -62,6 +70,10 @@ def is_dns_query(pkt):
 def is_dns_response(pkt):
     return DNS in pkt and pkt[DNS].qr == 1
 
+# ------------------------------------------------------------
+# Argument parsing
+# ------------------------------------------------------------
+
 def parse_args():
     p = argparse.ArgumentParser(description="PCAP Packet Summary (Option A)")
     p.add_argument("--pcap", required=True, help="Path to pcap/pcapng file")
@@ -71,21 +83,27 @@ def parse_args():
     p.add_argument("--max-packets", type=int, default=None, help="Limit number of packets (for testing)")
     return p.parse_args()
 
+# ------------------------------------------------------------
+# Main processing
+# ------------------------------------------------------------
+
 def main():
     args = parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
+    # Load packets from PCAP file
     packets = rdpcap(args.pcap)
     if args.max_packets is not None:
         packets = packets[: args.max_packets]
 
+    # Output file paths
     csv_path = os.path.join(args.outdir, "summary.csv")
     report_path = os.path.join(args.outdir, "report.txt")
 
-    # Aggregates
+    # Aggregation containers
     tcp_flag_counts = Counter()
-    flow_set = set()            # undirected flows
     proto_counts = Counter()
+    flow_set = set()                # track unique TCP/UDP flows
     dns_query_count = 0
     dns_resp_count = 0
     dns_nxdomain_count = 0
@@ -100,6 +118,9 @@ def main():
     # For DNS RTTs: pending_queries[(txid, src, dst)] = ts
     pending_queries = {}
 
+    # ------------------------------------------------------------
+    # Per-packet processing (CSV output + aggregation)
+    # ------------------------------------------------------------
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -110,9 +131,9 @@ def main():
 
         for pkt in packets:
             # Optional filters
-            if args.only_dns and not (DNS in pkt):
+            if args.only_dns and (DNS not in pkt):
                 continue
-            if args.only_tcp and not (TCP in pkt):
+            if args.only_tcp and (TCP not in pkt):
                 continue
 
             ts = float(pkt.time)
